@@ -1,0 +1,43 @@
+name: PriceHunter WB Search
+
+on:
+  repository_dispatch:
+    types: [pricehunter_search]
+  # можно запускать и вручную для теста, с теми же полями
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Поисковый запрос"
+        required: true
+      min_price:
+        description: "Минимальная цена"
+        required: false
+        default: "1"
+      max_price:
+        description: "Максимальная цена"
+        required: false
+        default: "1000000"
+      chat_id:
+        description: "Telegram chat_id"
+        required: true
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Run parser and send result to Telegram
+        env:
+          QUERY: ${{ github.event.client_payload.query || github.event.inputs.query }}
+          MIN_PRICE: ${{ github.event.client_payload.min_price || github.event.inputs.min_price }}
+          MAX_PRICE: ${{ github.event.client_payload.max_price || github.event.inputs.max_price }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python wb_search_action.py
