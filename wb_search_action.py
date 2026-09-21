@@ -87,7 +87,10 @@ def find_category_by_query(query: str, catalog_list: list):
 
 def get_data_from_json(json_file: dict) -> list:
     data_list = []
-    products = (json_file or {}).get("data", {}).get("products", [])
+    json_file = json_file or {}
+    products = json_file.get("products")
+    if products is None:
+        products = json_file.get("data", {}).get("products", [])
     for data in products:
         try:
             sku = data.get("id")
