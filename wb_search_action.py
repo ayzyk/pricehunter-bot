@@ -131,7 +131,7 @@ def scrap_page(page: int, shard: str, query: str, low_price: int, top_price: int
         "Referer": "https://www.wildberries.ru/",
     }
     url = (
-        f"https://catalog.wb.ru/catalog/{shard}/v2/catalog"
+        f"https://catalog.wb.ru/catalog/{shard}/v4/catalog"
         f"?appType=1&curr=rub&dest={WB_DEST_MOSCOW}&locale=ru"
         f"&page={page}&priceU={low_price * 100};{top_price * 100}"
         f"&sort=rate&spp=0&{query}"
