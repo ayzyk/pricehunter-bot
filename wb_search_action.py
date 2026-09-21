@@ -139,6 +139,7 @@ def scrap_page(page: int, shard: str, query: str, low_price: int, top_price: int
     time.sleep(random.uniform(2.0, 4.0) + retry_count * 2)
     try:
         r = requests.get(url, headers=headers, timeout=15)
+        print(f"[DEBUG] status={r.status_code} url={url} body={r.text[:500]}")
     except requests.exceptions.RequestException as e:
         if retry_count < 3:
             time.sleep(5)
