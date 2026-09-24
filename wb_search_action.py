@@ -3,11 +3,20 @@ PriceHunter — автоматический подбор лучших това�
 Запускается в GitHub Actions (repository_dispatch), а не на серверах Make,
 т.к. Wildberries блокирует запросы с IP облачных платформ типа Make.com.
 
-Логика подбора товаров (каталог -> категория -> страницы -> сортировка по
-рейтингу и количеству отзывов) взята из пользовательского скрипта
+Логика подбора товаров взята из пользовательского скрипта
 wildberries_parser_on_catalog.py и адаптирована для запуска без интерактивного
 ввода — все параметры приходят через переменные окружения (их передаёт
 Make через repository_dispatch, GitHub Actions прокидывает их в env).
+
+Как ищем товар (два уровня):
+  1) Основной способ — настоящий полнотекстовый поиск Wildberries
+     (search.wb.ru), тот же самый движок, что работает в строке поиска
+     на сайте. Не привязан к статичному дереву категорий, поэтому находит
+     любой товар точно, как и сам сайт.
+  2) Запасной способ — если Wildberries не пропускает полнотекстовый поиск
+     для внешних запросов, подбираем ближайшую по названию категорию
+     каталога (catalog.wb.ru) и ищем в ней. Менее точно, но работает
+     стабильно в любом случае.
 
 Переменные окружения:
     QUERY               - поисковый запрос пользователя, например "велосипед спортивный"
@@ -25,6 +34,7 @@ import time
 import random
 import json
 import difflib
+import urllib.parse
 import requests
 import pandas as pd
 import pymorphy3
@@ -44,6 +54,52 @@ def _lemmatize(word: str) -> str:
         return _morph.parse(word)[0].normal_form.replace("ё", "е")
     except Exception:
         return word
+
+
+def _wb_headers() -> dict:
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+        "Referer": "https://www.wildberries.ru/",
+    }
+
+
+def search_wb_fulltext(query: str, page: int, low_price: int, top_price: int, retry_count: int = 0):
+    """
+    Настоящий полнотекстовый поиск Wildberries (тот же движок, что и строка
+    поиска на сайте) — ищет напрямую по тексту запроса, без привязки к
+    статичному дереву категорий. Возвращает None, если Wildberries не
+    пропустил запрос (сайт может заблокировать полнотекстовый поиск для
+    запросов не со своего сайта) — тогда main() переключается на поиск
+    по категориям.
+    """
+    url = (
+        "https://search.wb.ru/exactmatch/ru/common/v13/search"
+        f"?appType=1&curr=rub&dest={WB_DEST_MOSCOW}&locale=ru"
+        f"&page={page}&priceU={low_price * 100};{top_price * 100}"
+        f"&sort=rate&spp=0&suppressSpellcheck=false&resultset=catalog"
+        f"&query={urllib.parse.quote(query)}"
+    )
+    time.sleep(random.uniform(2.0, 4.0) + retry_count * 2)
+    try:
+        r = requests.get(url, headers=_wb_headers(), timeout=15)
+        print(f"[DEBUG search] status={r.status_code} url={url} body={r.text[:300]}")
+    except requests.exceptions.RequestException as e:
+        if retry_count < 3:
+            time.sleep(5)
+            return search_wb_fulltext(query, page, low_price, top_price, retry_count + 1)
+        return None
+    if r.status_code == 429 and retry_count < 3:
+        time.sleep(20 + retry_count * 10)
+        return search_wb_fulltext(query, page, low_price, top_price, retry_count + 1)
+    if r.status_code != 200:
+        return None
+    try:
+        return r.json()
+    except json.JSONDecodeError:
+        return None
 
 
 def get_catalogs_wb() -> dict:
@@ -80,11 +136,13 @@ def get_data_category(catalogs_wb) -> list:
 
 def find_category_by_query(query: str, catalog_list: list):
     """
-    Ищем наиболее подходящую категорию каталога по свободному текстовому
-    запросу пользователя. Сначала точное совпадение по леммам (начальным
-    формам слов), затем — если точного нет — ближайшая по написанию
-    категория, чтобы бот никогда не отвечал "не нашёл", а всегда
-    предлагал хоть какой-то разумный вариант.
+    Запасной способ (используется, только если search_wb_fulltext
+    недоступен): ищем наиболее подходящую категорию каталога по свободному
+    тексту запроса. Сначала точное совпадение по леммам (начальным формам
+    слов), затем — если точного нет — ближайшая по написанию категория, но
+    ТОЛЬКО если сходство действительно высокое. Если ничего убедительного
+    не нашлось — возвращаем None и честно говорим пользователю, что не
+    нашли, а не подсовываем случайную категорию не по теме.
     """
     STOPWORDS = {"для", "или", "как", "что", "это", "она", "мой", "моя", "при", "под", "над", "без", "про", "чем", "уже", "если", "все", "всё", "чтобы", "когда", "куда", "этот", "эта", "эти"}
     raw_words = [w.lower() for w in re.split(r"[\s,]+", query.strip()) if len(w) > 2 and w.lower() not in STOPWORDS]
@@ -106,8 +164,9 @@ def find_category_by_query(query: str, catalog_list: list):
     if best_score > 0:
         return best_match
 
-    # 2) запасной вариант: ближайшая по написанию категория (опечатки и
-    # слова, которых нет в каталоге дословно) — бот всегда что-то предложит
+    # 2) запасной вариант: ближайшая по написанию категория, но только при
+    # высоком сходстве (порог подобран так, чтобы не путать случайные слова
+    # вроде "отвертка"/"подсветка" — лучше честно не найти, чем ошибиться)
     best_match, best_ratio = None, 0.0
     for catalog in catalog_list:
         name = catalog.get("name", "").lower()
@@ -119,7 +178,9 @@ def find_category_by_query(query: str, catalog_list: list):
                     best_ratio = ratio
                     best_match = catalog
 
-    return best_match
+    if best_ratio >= 0.82:
+        return best_match
+    return None
 
 
 def get_data_from_json(json_file: dict) -> list:
@@ -163,13 +224,7 @@ def get_data_from_json(json_file: dict) -> list:
 
 
 def scrap_page(page: int, shard: str, query: str, low_price: int, top_price: int, retry_count: int = 0) -> dict:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) AppleWebKit/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Connection": "keep-alive",
-        "Referer": "https://www.wildberries.ru/",
-    }
+    headers = _wb_headers()
     url = (
         f"https://catalog.wb.ru/catalog/{shard}/v4/catalog"
         f"?appType=1&curr=rub&dest={WB_DEST_MOSCOW}&locale=ru"
@@ -250,21 +305,17 @@ def main():
     top_n = int(os.environ.get("TOP_N") or 5)
 
     try:
-        catalog_list = get_data_category(get_catalogs_wb())
-        category = find_category_by_query(query, catalog_list)
-
-        if category is None:
-            send_telegram_message(
-                token, chat_id,
-                f"Не смог найти подходящую категорию на Wildberries для запроса «{query}». "
-                f"Попробуй сформулировать проще (например, одно-два слова)."
-            )
-            return
-
         data_list = []
+        category_name = None
+
+        # 1) основной способ — настоящий полнотекстовый поиск Wildberries
+        search_available = True
         empty_pages = 0
         for page in range(1, pages + 1):
-            result = scrap_page(page, category["shard"], category["query"], min_price, max_price)
+            result = search_wb_fulltext(query, page, min_price, max_price)
+            if result is None:
+                search_available = False
+                break
             products = get_data_from_json(result)
             if not products:
                 empty_pages += 1
@@ -273,10 +324,38 @@ def main():
                 continue
             data_list.extend(products)
 
+        # 2) запасной способ — если Wildberries не пропустил полнотекстовый
+        # поиск, ищем по ближайшей категории каталога
+        if not search_available:
+            data_list = []
+            catalog_list = get_data_category(get_catalogs_wb())
+            category = find_category_by_query(query, catalog_list)
+
+            if category is None:
+                send_telegram_message(
+                    token, chat_id,
+                    f"Не смог найти подходящую категорию на Wildberries для запроса «{query}». "
+                    f"Попробуй сформулировать проще (например, одно-два слова)."
+                )
+                return
+
+            category_name = category["name"]
+            empty_pages = 0
+            for page in range(1, pages + 1):
+                result = scrap_page(page, category["shard"], category["query"], min_price, max_price)
+                products = get_data_from_json(result)
+                if not products:
+                    empty_pages += 1
+                    if empty_pages >= 2:
+                        break
+                    continue
+                data_list.extend(products)
+
         if not data_list:
+            where = f" в категории «{category_name}»" if category_name else ""
             send_telegram_message(
                 token, chat_id,
-                f"По запросу «{query}» в категории «{category['name']}» ничего не нашлось "
+                f"По запросу «{query}»{where} ничего не нашлось "
                 f"в диапазоне {min_price}–{max_price} ₽. Попробуй расширить диапазон цен."
             )
             return
@@ -285,7 +364,8 @@ def main():
         data_list.sort(key=lambda p: (p["Рейтинг товара"], p["Количество отзывов"]), reverse=True)
 
         top_products = data_list[:top_n]
-        lines = [f"Готово! 🎉 Нашёл и отсортировал товары по «{query}» ({category['name']}) от {min_price} до {max_price} ₽.\n"]
+        title_suffix = f" ({category_name})" if category_name else ""
+        lines = [f"Готово! 🎉 Нашёл и отсортировал товары по «{query}»{title_suffix} от {min_price} до {max_price} ₽.\n"]
         lines.append(f"🏆 Топ-{len(top_products)} по рейтингу и отзывам:\n")
         for i, p in enumerate(top_products, 1):
             lines.append(
