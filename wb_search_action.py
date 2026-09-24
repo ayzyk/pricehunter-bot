@@ -24,12 +24,26 @@ import re
 import time
 import random
 import json
+import difflib
 import requests
 import pandas as pd
+import pymorphy3
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 WB_DEST_MOSCOW = -1257786  # код региона "Москва и область" в API Wildberries
+
+_morph = pymorphy3.MorphAnalyzer()
+
+
+def _lemmatize(word: str) -> str:
+    """Приводим слово к начальной форме (лемме), чтобы "чехлы" и "чехол",
+    "велосипеды" и "велосипед" и т.п. считались одним и тем же словом."""
+    word = word.replace("ё", "е")
+    try:
+        return _morph.parse(word)[0].normal_form.replace("ё", "е")
+    except Exception:
+        return word
 
 
 def get_catalogs_wb() -> dict:
@@ -67,23 +81,45 @@ def get_data_category(catalogs_wb) -> list:
 def find_category_by_query(query: str, catalog_list: list):
     """
     Ищем наиболее подходящую категорию каталога по свободному текстовому
-    запросу пользователя (а не по ссылке, как в оригинальном скрипте) —
-    сравниваем слова запроса с названием категории.
+    запросу пользователя. Сначала точное совпадение по леммам (начальным
+    формам слов), затем — если точного нет — ближайшая по написанию
+    категория, чтобы бот никогда не отвечал "не нашёл", а всегда
+    предлагал хоть какой-то разумный вариант.
     """
     STOPWORDS = {"для", "или", "как", "что", "это", "она", "мой", "моя", "при", "под", "над", "без", "про", "чем", "уже", "если", "все", "всё", "чтобы", "когда", "куда", "этот", "эта", "эти"}
-    words = [w.lower() for w in re.split(r"[\s,]+", query.strip()) if len(w) > 2 and w.lower() not in STOPWORDS]
-    if not words:
+    raw_words = [w.lower() for w in re.split(r"[\s,]+", query.strip()) if len(w) > 2 and w.lower() not in STOPWORDS]
+    if not raw_words:
         return None
 
+    query_lemmas = {_lemmatize(w) for w in raw_words}
+
+    # 1) точное совпадение по леммам
     best_match, best_score = None, 0
     for catalog in catalog_list:
         name = catalog.get("name", "").lower()
-        score = sum(1 for w in words if w in name)
+        name_words = re.split(r"[^а-яё]+", name)
+        name_lemmas = {_lemmatize(nw) for nw in name_words if len(nw) > 2}
+        score = len(query_lemmas & name_lemmas)
         if score > best_score:
             best_score = score
             best_match = catalog
+    if best_score > 0:
+        return best_match
 
-    return best_match if best_score > 0 else None
+    # 2) запасной вариант: ближайшая по написанию категория (опечатки и
+    # слова, которых нет в каталоге дословно) — бот всегда что-то предложит
+    best_match, best_ratio = None, 0.0
+    for catalog in catalog_list:
+        name = catalog.get("name", "").lower()
+        name_words = [w for w in re.split(r"[^а-яё]+", name) if len(w) > 2]
+        for qw in query_lemmas:
+            for nw in name_words:
+                ratio = difflib.SequenceMatcher(None, qw, nw).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_match = catalog
+
+    return best_match
 
 
 def get_data_from_json(json_file: dict) -> list:
