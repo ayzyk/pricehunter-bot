@@ -1,3 +1,5 @@
 requests
 pandas
 openpyxl
+pymorphy3
+pymorphy3-dicts-ru
