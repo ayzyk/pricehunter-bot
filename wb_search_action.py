@@ -70,7 +70,8 @@ def find_category_by_query(query: str, catalog_list: list):
     запросу пользователя (а не по ссылке, как в оригинальном скрипте) —
     сравниваем слова запроса с названием категории.
     """
-    words = [w.lower() for w in re.split(r"[\s,]+", query.strip()) if len(w) > 2]
+    STOPWORDS = {"для", "или", "как", "что", "это", "она", "мой", "моя", "при", "под", "над", "без", "про", "чем", "уже", "если", "все", "всё", "чтобы", "когда", "куда", "этот", "эта", "эти"}
+    words = [w.lower() for w in re.split(r"[\s,]+", query.strip()) if len(w) > 2 and w.lower() not in STOPWORDS]
     if not words:
         return None
 
