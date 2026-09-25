@@ -1,4 +1,4 @@
-name: PriceHunter WB Search
+name: TenderHunter Search
 
 on:
   repository_dispatch:
@@ -17,6 +17,10 @@ on:
         description: "Максимальная цена"
         required: false
         default: "1000000"
+      customer:
+        description: "Фильтр по заказчику (например Газпром или Сбербанк), можно оставить пустым"
+        required: false
+        default: ""
       chat_id:
         description: "Telegram chat_id"
         required: true
@@ -36,8 +40,9 @@ jobs:
       - name: Run parser and send result to Telegram
         env:
           QUERY: ${{ github.event.client_payload.query || github.event.inputs.query }}
-          MIN_PRICE: ${{ github.event.client_payload.min_price || github.event.inputs.min_price }}
-          MAX_PRICE: ${{ github.event.client_payload.max_price || github.event.inputs.max_price }}
-          CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
+          LOW_PRICE: ${{ github.event.client_payload.min_price || github.event.inputs.min_price }}
+          TOP_PRICE: ${{ github.event.client_payload.max_price || github.event.inputs.max_price }}
+          CUSTOMER: ${{ github.event.client_payload.customer || github.event.inputs.customer || '' }}
+          TELEGRAM_CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: python wb_search_action.py
+        run: python zakupki_search_action.py
